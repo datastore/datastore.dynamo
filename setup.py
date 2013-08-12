@@ -36,7 +36,7 @@ setup(
   ],
   packages=packages,
   namespace_packages=['datastore'],
-  install_requires=['datastore>=0.3.3', 'boto>=2.5.2'],
+  install_requires=['datastore>=0.3.7', 'boto>=2.5.2', 'bson>=0.3.3'],
   test_suite='datastore.dynamo.test',
   license='MIT License',
   classifiers=[

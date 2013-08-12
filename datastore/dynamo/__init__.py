@@ -18,6 +18,8 @@ from boto.exception import JSONResponseError
 
 import time
 import datastore.core
+from bson import json_util
+import json
 #import datastore.core
 
 
@@ -53,9 +55,10 @@ class DynamoDatastore(datastore.Datastore):
 
     '''
 
-    def __init__(self, conn):
+    def __init__(self, conn, prefix=""):
         self.conn = conn
         self._indexed = {}
+        self.prefix = prefix
 
     def _tableNamed(self, name):
         '''Returns the `table` named `name`.'''
@@ -98,7 +101,7 @@ class DynamoDatastore(datastore.Datastore):
 
     def _table(self, key):
         '''Returns the `table` corresponding to `key`.'''
-        return self._tableNamed(self._tableNameForKey(key))
+        return self._tableNamed(self.prefix + self._tableNameForKey(key))
 
     def _item(self, key):
         # can't use get_item without knowing the range key
@@ -106,16 +109,25 @@ class DynamoDatastore(datastore.Datastore):
         return next(self._table(key).query(**q), None)
 
     @staticmethod
-    def _wrap(key, val, existing=None):
+    def _should_pickle(key, val):
+        return not key in [Doc.key, Doc.rangekey, Doc.value, Doc.wrapped, Doc._id]
+
+    @staticmethod
+    def _wrap(key, value, existing=None):
         '''Returns a value to insert. Non-documents are wrapped in a document.'''
-        if not isinstance(val, dict) or Doc.key not in val or val[Doc.key] != key:
-            val = { Doc.key:key, Doc.value:val, Doc.wrapped:True}
+        if not isinstance(value, dict) or Doc.key not in value or value[Doc.key] != key:
+            value = { Doc.key:key, Doc.value:val, Doc.wrapped:True}
 
-        if Doc._id in val:
-            del val[Doc._id]
+        if Doc._id in value:
+            del value[Doc._id]
 
-        val[Doc.rangekey] = existing._data['rangekey'] if existing else time.time()
-        return val
+        value[Doc.rangekey] = existing._data['rangekey'] if existing else time.time()
+
+        for k,v in value.iteritems():
+            if DynamoDatastore._should_pickle(k,v):
+                value[k] = json.dumps(v, default=json_util.default)
+
+        return value
 
     @staticmethod
     def _unwrap(value):
@@ -127,6 +139,10 @@ class DynamoDatastore(datastore.Datastore):
             del value[Doc._id]
         if isinstance(value, dict) and Doc.rangekey in value:
             del value[Doc.rangekey]
+
+        for k,v in value.iteritems():
+            if DynamoDatastore._should_pickle(k,v):
+                value[k] = json.loads(v, object_hook=json_util.object_hook)
 
         return value
 
@@ -174,7 +190,7 @@ class DynamoCursor(datastore.Cursor):
     def next(self):
         next = super(DynamoCursor, self).next()
         if next is not StopIteration:
-            next = DynamoDatastore._unwrap(next)
+            next = DynamoDatastore._unwrap(next._data)
         return next
 
 class DynamoQuery(object):
