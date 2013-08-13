@@ -43,6 +43,23 @@ class TestDynamoDatastore(TestDatastore):
     self.ds = DynamoDatastore(self.conn)
     self.subtest_simple([self.ds], numelems=20)
 
+  def test_dict_query(self):
+    self.ds = DynamoDatastore(self.conn)
+    pkey = '/dfadasfdsafdas'
+    key = Key(pkey + '/abc')
+    test_dict = {'key': str(key), 'a': 3, 'b': {'1':2,'2':3}}
+    
+    self.ds.put(key, test_dict)
+
+    res = self.ds.get(key)
+    assert res == test_dict
+
+    res = self.ds.query(Query(Key(pkey)).filter('b','=',test_dict['b']))
+    first = next(res, None)
+    assert first is not None
+    assert first == test_dict
+
+
   def subtest_queries(self):
     for value in range(0, self.numelems):
       key = self.pkey.child(value)

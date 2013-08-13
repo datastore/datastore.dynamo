@@ -16,6 +16,8 @@ from boto.dynamodb2.fields import HashKey, RangeKey
 from boto.dynamodb2.types import NUMBER
 from boto.exception import JSONResponseError
 
+from copy import deepcopy
+
 import time
 import datastore.core
 from bson import json_util
@@ -116,24 +118,21 @@ class DynamoDatastore(datastore.Datastore):
     def _wrap(key, value, existing=None):
         '''Returns a value to insert. Non-documents are wrapped in a document.'''
         if not isinstance(value, dict) or Doc.key not in value or value[Doc.key] != key:
-            value = { Doc.key:key, Doc.value:val, Doc.wrapped:True}
-
-        if Doc._id in value:
-            del value[Doc._id]
-
-        value[Doc.rangekey] = existing._data['rangekey'] if existing else time.time()
-
-        for k,v in value.iteritems():
-            if DynamoDatastore._should_pickle(k,v):
-                value[k] = json.dumps(v, default=json_util.default)
-
-        return value
+            wrapped = { Doc.key:key, Doc.value:json.dumps(value, default=json_util.default), Doc.wrapped:True}
+        else:
+            wrapped = {Doc.key: key}
+            for k,v in value.iteritems():
+                if not k in [Doc.key, Doc.rangekey, Doc.value, Doc.wrapped, Doc._id]:
+                    wrapped[k] = json.dumps(v, default=json_util.default)
+        
+        wrapped[Doc.rangekey] = existing._data['rangekey'] if existing else time.time()
+        return wrapped
 
     @staticmethod
     def _unwrap(value):
         '''Returns a value to return. Wrapped-documents are unwrapped.'''
         if value is not None and Doc.wrapped in value and value[Doc.wrapped]:
-          return value[Doc.value]
+          return json.loads(value[Doc.value], object_hook=json_util.object_hook)
 
         if isinstance(value, dict) and Doc._id in value:
             del value[Doc._id]
@@ -235,7 +234,7 @@ class DynamoQuery(object):
     @classmethod
     def filter(cls, filter):
         '''Transform given `filter` into a dynamodb filter tuple.'''
-        return '%s__%s' % (filter.field, cls.operators[filter.op]), filter.value
+        return '%s__%s' % (filter.field, cls.operators[filter.op]), json.dumps(filter.value, default=json_util.default)
 
     @classmethod
     def filters(cls, filters):
