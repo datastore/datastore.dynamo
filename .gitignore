@@ -6,3 +6,4 @@ dist
 pypi/
 .tox
 venv/
+datastore/dynamo/test_settings.py

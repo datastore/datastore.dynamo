@@ -13,26 +13,25 @@ from boto.dynamodb2.layer1 import DynamoDBConnection
 from boto.dynamodb2.items import Item
 from boto.dynamodb2.table import Table
 from boto.dynamodb2.fields import HashKey, RangeKey
-from boto.dynamodb2.types import NUMBER
+from boto.dynamodb2.types import NUMBER, STRING
 from boto.exception import JSONResponseError
 
 from copy import deepcopy
 
 import time
 import datastore.core
-from bson import json_util
 import json
-#import datastore.core
-
+from datastore.core import Key, Namespace
+from bson import json_util
+from decimal import *
 
 class Doc(object):
     '''Document key constants for datastore documents.'''
     _id = '_id'
     key = 'key'
-    rangekey = 'rangekey'
+    hashkey = '_partition'
     value = 'val'
     wrapped = '_wrapped'
-
 
 class DynamoDatastore(datastore.Datastore):
     '''Represents a AWS DynamoDB database as a datastore.
@@ -56,127 +55,277 @@ class DynamoDatastore(datastore.Datastore):
       None
 
     '''
-
-    def __init__(self, conn, prefix=""):
-        self.conn = conn
-        self._indexed = {}
-        self.prefix = prefix
-
-    def _tableNamed(self, name):
-        '''Returns the `table` named `name`.'''
-
-        # Let boto figure out the schema, so we don't have to worry about it
-        # This comes at the cost of an extra call
-        table = Table(name, connection=self.conn)
-        
-        # If we don't know yet for sure this table exists, check
-        if self._indexed.get(name, None) is None:
-            try:
-                status = table.describe()
-            except JSONResponseError, e:
-                # Create if it doesn't exist yet
-                table = Table.create(name, schema=[
-                    HashKey(Doc.key),
-                    RangeKey(Doc.rangekey, data_type=NUMBER)
-                ], connection=self.conn)
-                status = table.describe()
-
-            # Wait for it to be active
-            while status['Table']['TableStatus'] != 'ACTIVE':
-                time.sleep(1)
-                status = table.describe()
-
-            self._indexed[name] = True
-
-        return table
+    @staticmethod
+    def _table_has_range_key(key):
+        return len(key.namespaces) > 3
 
     @staticmethod
-    def _tableNameForKey(key):
+    def _table_name_for_key(key):
         '''Returns the name of the table to house objects with `key`.
         Users can override this function to enforce their own table naming.
         '''
-        name = str(key.path)[1:]        # remove first slash.
+        # use the second to last namespace as range key
+        table_path = key.parent.path if DynamoDatastore._table_has_range_key(key) else key.path
+
+        name = str(table_path)[1:]        # remove first slash.
         name = name.replace(':', '_')   # no : allowed in collection names, use _
         name = name.replace('/', '.')   # no / allowed in collection names, use .
         name = name or '_'              # if collection name is empty, use _
+
         return name
-
-    def _table(self, key):
-        '''Returns the `table` corresponding to `key`.'''
-        return self._tableNamed(self.prefix + self._tableNameForKey(key))
-
-    def _item(self, key):
-        # can't use get_item without knowing the range key
-        q = {'%s__eq'%Doc.key:str(key), 'limit': 1}
-        return next(self._table(key).query(**q), None)
 
     @staticmethod
     def _should_pickle(key, val):
-        return not key in [Doc.key, Doc.rangekey, Doc.value, Doc.wrapped, Doc._id]
+        return not key in [Doc.key, Doc.hashkey, Doc.wrapped, Doc._id]
 
     @staticmethod
-    def _wrap(key, value, existing=None):
-        '''Returns a value to insert. Non-documents are wrapped in a document.'''
-        if not isinstance(value, dict) or Doc.key not in value or value[Doc.key] != key:
-            wrapped = { Doc.key:key, Doc.value:json.dumps(value, default=json_util.default), Doc.wrapped:True}
+    def _wrap_value(value):
+        if isinstance(value, basestring):
+            return value
+        elif isinstance(value, (int, long, float)):
+            return value
         else:
-            wrapped = {Doc.key: key}
-            for k,v in value.iteritems():
-                if not k in [Doc.key, Doc.rangekey, Doc.value, Doc.wrapped, Doc._id]:
-                    wrapped[k] = json.dumps(v, default=json_util.default)
+            return json.dumps(value, default=json_util.default)
+
+    @staticmethod
+    def _wrap(table, key, value):
+        '''Returns a value to insert. Non-documents are wrapped in a document.'''
         
-        wrapped[Doc.rangekey] = existing._data['rangekey'] if existing else time.time()
+        if not isinstance(value, dict):
+            wrapped = {Doc.value:json.dumps(value, default=json_util.default), Doc.wrapped:True}
+        else:
+            wrapped = dict( (k, DynamoDatastore._wrap_value(v)) for (k,v) in value.iteritems() if DynamoDatastore._should_pickle(k,v) )
+        
+        table.validate_key_for_value(key, value)
+        if table.hash_key == Doc.hashkey:
+            pk = table.primary_key_from_key(key)
+            wrapped[Doc.hashkey] = pk[table.hash_key]
+
+        wrapped[Doc.key] = str(key)
+
         return wrapped
+
+    @staticmethod
+    def _unwrap_value(value):
+        if isinstance(value, basestring):
+            try:
+                return json.loads(value, object_hook=json_util.object_hook)
+            except:
+                return value
+        elif isinstance(value, Decimal):
+            if int(value) == value:
+                return int(value)
+            elif long(value) == value:
+                return long(value)
+            else:
+                return float(value)
+        return value
 
     @staticmethod
     def _unwrap(value):
         '''Returns a value to return. Wrapped-documents are unwrapped.'''
-        if value is not None and Doc.wrapped in value and value[Doc.wrapped]:
-          return json.loads(value[Doc.value], object_hook=json_util.object_hook)
 
-        if isinstance(value, dict) and Doc._id in value:
-            del value[Doc._id]
-        if isinstance(value, dict) and Doc.rangekey in value:
-            del value[Doc.rangekey]
+        if value is not None and Doc.wrapped in value and value[Doc.wrapped]:
+          return DynamoDatastore._unwrap_value(value[Doc.value])
+
+        if isinstance(value, dict):
+            if Doc._id in value:
+                del value[Doc._id]
+            if Doc.hashkey in value:
+                del value[Doc.hashkey]
 
         for k,v in value.iteritems():
             if DynamoDatastore._should_pickle(k,v):
-                value[k] = json.loads(v, object_hook=json_util.object_hook)
+                value[k] = DynamoDatastore._unwrap_value(v)
 
         return value
 
+    def __init__(self, conn, prefix=""):
+        self.conn = conn
+        self.prefix = prefix
+
+        # Tables
+        self._tables = {}
+
+    def _create_table(self, name, range_key=False):
+        if range_key:
+            schema = [
+                HashKey(Doc.hashkey, data_type=STRING),
+                RangeKey(Doc.key, data_type=STRING)
+            ]
+        else:
+            schema = [
+                HashKey(Doc.key, data_type=STRING) # by default, use single index
+            ]
+
+        Table.create(name, schema=schema, connection=self.conn)
+
+
+    def _table(self, key):
+        '''Returns the `table` corresponding to `key`.'''
+        name = self.prefix + self._table_name_for_key(key)
+
+        if not self._tables.get(name, None):
+            # Let boto figure out the schema, so we don't have to worry about it
+            # This comes at the cost of an extra call
+            table = DynamoTable(name, connection=self.conn)
+
+            # If we don't know yet for sure this table exists, check
+            if not table.exists():
+                self._create_table(name, range_key=DynamoDatastore._table_has_range_key(key))
+
+            while not table.ready:
+                time.sleep(1)
+                table.prepare()
+
+            self._tables[name] = table
+
+        return self._tables[name]
+
     def get(self, key):
         '''Return the object named by key.'''
-        item = self._item(key)
-        return self._unwrap(item._data) if item else None
+        table = self._table(key)
+        item = table.get_item(**table.primary_key_from_key(key))
+        return self._unwrap(item._data) if item and item._data != {} else None
 
     def put(self, key, value):
         '''Stores the object.'''
-        # Need to get the old version to get the range key value
-        existing = self._item(key)
-        value = self._wrap(str(key), value, existing)
+        table = self._table(key)
 
-        item = Item(self._table(key), data=value)
+        value = self._wrap(table, key, value)
+        item = Item(table, data=value)
         item.save(overwrite=True)
 
     def delete(self, key):
         '''Removes the object.'''
-        item = self._item(key)
-        if item:
-            item.delete()
+        table = self._table(key)
+        table.delete_item(**table.primary_key_from_key(key))
 
     def contains(self, key):
         '''Returns whether the object is in this datastore.'''
-        try:
-            q = {'%s__eq'%Doc.key:str(key)}
-            return self._table(key).query_count(**q) > 0
-        except JSONResponseError, e:
-            return False
+        return self.get(key) is not None
 
     def query(self, query):
         '''Returns a sequence of objects matching criteria expressed in `query`'''
         table = self._table(query.key.child('_'))
         return DynamoQuery.translate(table, query)
+
+class DynamoTable(Table):
+    def exists(self):
+        try:
+            self.prepare()
+            return True
+        except JSONResponseError, e:
+            return False
+
+    def prepare(self):
+        status = self.describe()
+
+        if status['Table']['TableStatus'] == 'ACTIVE':             
+            self._name = status['Table']['TableName']
+            
+            def key_by_type_from_schema(schema, type):
+                return next((s['AttributeName'] for s in schema if s['KeyType'] == type), None)
+            def extract_index(idx):
+                return (key_by_type_from_schema(idx['KeySchema'], 'RANGE'), idx['IndexName'])
+            def data_type_for_attribute(attr):
+                dtype = attr['AttributeType']
+                dtype_map = {'N': Decimal, 'S': str}
+                if dtype in dtype_map:
+                    return dtype_map[dtype]
+                else:raise Exception('Unsupported datatype %s for attribute %s in underlying DynamoDB table %s' % (dtype, attr['AttributeName'], self._name))
+            def data_type_by_attribute(definitions):
+                return dict( (attr['AttributeName'], data_type_for_attribute(attr)) for attr in definitions)
+
+            self._datatypes = data_type_by_attribute(status['Table']['AttributeDefinitions'])
+            self._hash_key = key_by_type_from_schema(status['Table']['KeySchema'], 'HASH')
+            self._range_key = key_by_type_from_schema(status['Table']['KeySchema'], 'RANGE')
+            self._indices = dict(extract_index(idx) for idx in status['Table'].get('LocalSecondaryIndexes', []))
+            self._ready = True
+
+    @property
+    def name(self):
+        return self._name if hasattr(self, '_name') else None
+
+    @property
+    def ready(self):
+        return hasattr(self, '_ready') and self._ready
+
+    @property
+    def datatypes(self):
+        return self._datatypes if hasattr(self, '_datatypes') else None
+
+    @property
+    def indices(self):
+        return self._indices if hasattr(self, '_indices') else []
+
+    @property
+    def hash_key(self):
+        return self._hash_key if hasattr(self, '_hash_key') else None
+
+    @property
+    def range_key(self):
+        return self._range_key if hasattr(self, '_range_key') else None
+
+    @property
+    def keys(self):
+        return [k for k in [self.hash_key, self.range_key] if k is not None]
+
+    def validate_key_for_value(self, key, value):
+        '''Verifies that the key is in valid format for the specified table.
+        When the underlying table uses a range key or a non-default hash key, there
+        are certain limitations on the Key format so that we can always deduce the
+        Dynamo primary key from the datastore Key
+        '''
+        valid = True
+
+        expected_key = Key(self.name).child(value.get(self.hash_key, '')) if type(value) == dict else None
+        if self.range_key:
+            if self.range_key == Doc.key:
+                # PK is (hash_key, Key)
+                # Key needs to be /table/hash_key/...                
+                if type(value) != dict or not key.isDescendantOf(expected_key):
+                    raise Exception('Underlying DynamoDB table requires key to be /%s/%s/..., was %s' % (self.name, self.hash_key, str(key)))    
+            else:
+                # PK is (hash_key, range_key) != (hash_key, Key)
+                # Key needs to be /table/hash_key/range_key
+                if type(value) != dict or key != expected_key.child(value.get(self.range_key, '')):                
+                    raise Exception('Underlying DynamoDB table requires key to be /%s/%s/%s was %s' % (self.name, self.hash_key, self.range_key, str(key)))                    
+        elif self.hash_key != Doc.key:
+            # PK is (hash_key) != (Key)
+            # Key then has to be /table/hash_key
+            if type(value) != dict or key != expected_key: 
+                raise Exception('Underlying DynamoDB table requires key to be /%s/%s, was %s' % (self.name, self.hash_key, str(key)))
+
+    def primary_key_from_key(self, key):
+        '''Returns the Dynamo primary key for the datastore key,
+        depending on the schema of the underlying Dynamo table.
+        '''
+        hash_key, range_key = None, None
+
+        if self.range_key:
+            # When a range key is specified, the hash key is the 
+            # second-to-last namespace
+            hash_key = str(key.namespaces[-2])
+            if self.range_key == Doc.key:
+                # The range key is the full Key
+                range_key = str(key)
+            else:
+                # The range key is the last namespace
+                range_key = str(key.namespaces[-1])
+        elif self.hash_key != Doc.key:
+            # Everything before the 
+            hash_key = str(Key(key.namespaces[-2:]))
+        else:
+            hash_key = str(key)
+
+        # Cast to correct types
+        primary_key = {self.hash_key: self.datatypes[self.hash_key](hash_key)}
+        if self.range_key:
+            primary_key[self.range_key] = self.datatypes[self.range_key](range_key)
+
+        return primary_key
+
 
 class DynamoCursor(datastore.Cursor):
     @property
@@ -198,15 +347,12 @@ class DynamoQuery(object):
 
     @classmethod
     def offset_key(self, table, key):
-        # Allow passing just the keyas a string or Key as well
+        # Allow passing just the key as a string or Key as well
         if type(key) is dict:
             return key
 
         if type(key) is str or isinstance(key, datastore.Key):
-            item = next(table.query(**{'%s__eq' % Doc.key: str(key), 'limit':1}), None)
-            if not item:
-                raise Exception('Item for offset_key not found')
-            return {Doc.key: item._data[Doc.key], Doc.rangekey: item._data[Doc.rangekey]}
+            return table.primary_key_from_key(key)
 
     @classmethod
     def translate(self, table, query):
@@ -224,9 +370,18 @@ class DynamoQuery(object):
         if query.offset_key:
             kwargs['exclusive_start_key'] = self.offset_key(table, query.offset_key)
 
-        # TODO: Use query on index instead of scan when filtering on an indexed field
-        cursor = table.scan(**kwargs)
+        # If we're looking at a specific hash key, we can query instead of scan
+        if table.hash_key + '__eq' in kwargs.keys():
+            filter_fields = [f.field for f in query.filters]
+            for (field, idx) in table.indices.iteritems():
+                if field in filter_fields:
+                    kwargs['index'] = idx
+                    break
 
+            cursor = table.query(**kwargs)
+        else:
+            cursor = table.scan(**kwargs)
+        
         # create datastore Cursor with query and iterable of results
         datastore_cursor = DynamoCursor(query, cursor)
         return datastore_cursor
@@ -234,7 +389,7 @@ class DynamoQuery(object):
     @classmethod
     def filter(cls, filter):
         '''Transform given `filter` into a dynamodb filter tuple.'''
-        return '%s__%s' % (filter.field, cls.operators[filter.op]), json.dumps(filter.value, default=json_util.default)
+        return '%s__%s' % (filter.field, cls.operators[filter.op]), DynamoDatastore._wrap_value(filter.value)
 
     @classmethod
     def filters(cls, filters):
