@@ -86,17 +86,20 @@ class TestDynamoDatastore(TestDatastore):
     self.ds = DynamoDatastore(self.conn)
     pkey = '/' + self.SIMPLE_TABLE
     key = Key(pkey + '/abc')
-    test_dict = {'key': str(key), 'a': 3, 'b': {'1':2,'2':3}}
+    test_dict = {'key': str(key), 'a': 3, 'b': {'1':2,'2':3}, 'c': True, 'd': False}
     
     self.ds.put(key, test_dict)
 
     res = self.ds.get(key)
     assert res == test_dict
+    assert res['c'] is True
+    assert res['d'] is False
 
     res = self.ds.query(Query(Key(pkey)).filter('b','=',test_dict['b']))
     first = next(res, None)
     assert first is not None
     assert first == test_dict
+
 
   def test_rangekey_table(self):
     self.ds = DynamoDatastore(self.conn)
@@ -156,12 +159,15 @@ class TestDynamoDatastore(TestDatastore):
       assert self.ds.get(tom_key) == tom
       assert self.ds.get(barbara_key) == barbara
 
+      # Filter on hash key exclusively
       res = list(self.ds.query(Query(pkey).filter('department', '=', 1)))
       assert res == [tom, johnny] or res == [johnny, tom]
       
+      # Filter on hash and range key
       res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('name','=','Johnny')))
       assert res == [johnny]
       
+      # Filter on hash and secondary index key
       res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('score','>',500)))
       assert res == [tom, johnny] or res == [johnny, tom]
 

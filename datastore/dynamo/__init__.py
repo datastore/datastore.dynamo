@@ -82,7 +82,7 @@ class DynamoDatastore(datastore.Datastore):
     def _wrap_value(value):
         if isinstance(value, basestring):
             return value
-        elif isinstance(value, (int, long, float)):
+        elif type(value) in [int, long, float]:
             return value
         else:
             return json.dumps(value, default=json_util.default)
