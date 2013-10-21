@@ -101,7 +101,7 @@ class TestDynamoDatastore(TestDatastore):
   def test_rangekey_table(self):
     self.ds = DynamoDatastore(self.conn)
     pkey = '/' + self.RANGEKEY_TABLE
-    key = Key(pkey + '/hash1/abc')
+    key = Key(pkey + '/hash1.abc')
     test_dict = {'key': str(key), 'a': 3, 'b': {'1':2,'2':3}}
     self.ds.put(key, test_dict)
 
@@ -114,7 +114,7 @@ class TestDynamoDatastore(TestDatastore):
     self.ds = DynamoDatastore(self.conn)
     pkey = Key('/' + self.INDEXED_TABLE)
 
-    johnny_key = pkey.child('1/Johnny')
+    johnny_key = pkey.child('1.Johnny')
     johnny = {
       'key': str(johnny_key),
       'department': 1,
@@ -122,7 +122,7 @@ class TestDynamoDatastore(TestDatastore):
       'age': 20,
       'score': 1500
     }
-    tom_key = pkey.child('1/Tom')
+    tom_key = pkey.child('1.Tom')
     tom = {
       'key': str(tom_key),
       'department': 1,
@@ -130,7 +130,7 @@ class TestDynamoDatastore(TestDatastore):
       'age': 30,
       'score': 1000
     }
-    barbara_key = pkey.child('2/Barbara')
+    barbara_key = pkey.child('2.Barbara')
     barbara = {
       'key': str(barbara_key),
       'department': 2,
@@ -157,7 +157,7 @@ class TestDynamoDatastore(TestDatastore):
       assert self.ds.get(barbara_key) == barbara
 
       res = list(self.ds.query(Query(pkey).filter('department', '=', 1)))
-      assert res == [tom, johnny] or [johnny, tom]
+      assert res == [tom, johnny] or res == [johnny, tom]
       
       res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('name','=','Johnny')))
       assert res == [johnny]
