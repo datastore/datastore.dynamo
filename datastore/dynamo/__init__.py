@@ -80,19 +80,21 @@ class DynamoDatastore(datastore.Datastore):
 
     @staticmethod
     def _wrap_value(value):
+        # We want to preserve data types as much as possible, so that querying remains intuitive
+        # i.e. 2 < 10 whereas '10' < '2'
         if isinstance(value, basestring):
             return value
         elif type(value) in [int, long, float]:
             return value
         else:
-            return json.dumps(value, default=json_util.default)
+            return '__obj__=' + json.dumps(value, default=json_util.default)
 
     @staticmethod
     def _wrap(table, key, value):
         '''Returns a value to insert. Non-documents are wrapped in a document.'''
         
         if not isinstance(value, dict):
-            wrapped = {Doc.value:json.dumps(value, default=json_util.default), Doc.wrapped:True}
+            wrapped = {Doc.value:DynamoDatastore._wrap_value(value), Doc.wrapped:True}
         else:
             wrapped = dict( (k, DynamoDatastore._wrap_value(v)) for (k,v) in value.iteritems() if DynamoDatastore._should_pickle(k,v) )
         
@@ -108,9 +110,9 @@ class DynamoDatastore(datastore.Datastore):
     @staticmethod
     def _unwrap_value(value):
         if isinstance(value, basestring):
-            try:
-                return json.loads(value, object_hook=json_util.object_hook)
-            except:
+            if value[0:8] == '__obj__=':
+                return json.loads(value[8:], object_hook=json_util.object_hook)
+            else:
                 return value
         elif isinstance(value, Decimal):
             if int(value) == value:

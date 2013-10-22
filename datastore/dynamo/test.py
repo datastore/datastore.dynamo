@@ -86,7 +86,7 @@ class TestDynamoDatastore(TestDatastore):
     self.ds = DynamoDatastore(self.conn)
     pkey = '/' + self.SIMPLE_TABLE
     key = Key(pkey + '/abc')
-    test_dict = {'key': str(key), 'a': 3, 'b': {'1':2,'2':3}, 'c': True, 'd': False}
+    test_dict = {'key': str(key), 'a': 3, 'b': {'1':2,'2':3}, 'c': True, 'd': False, 'e': '1.0'}
     
     self.ds.put(key, test_dict)
 
