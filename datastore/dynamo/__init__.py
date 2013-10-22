@@ -184,6 +184,15 @@ class DynamoDatastore(datastore.Datastore):
 
         return self._tables[name]
 
+    def tables(self):
+        names = self.conn.list_tables().get('TableNames', [])
+        def table_with_name(name):
+            table = DynamoTable(name, connection=self.conn)
+            table.prepare()
+            return table
+
+        return [table_with_name(n) for n in names if n.startswith(self.prefix)]
+
     def get(self, key):
         '''Return the object named by key.'''
         table = self._table(key)
@@ -284,25 +293,38 @@ class DynamoTable(Table):
         valid = True
 
         if self.range_key:
+            if type(value) != dict:
+                raise Exception('Underlying DynamoDB table requires values to be a dictionary')
+
             hash_val = value.get(self.hash_key, None)
+            range_val = value.get(self.range_key, '')
+
             if not hash_val:
                 raise Exception('Underlying DynamoDB table requires the hash key "%s" to be present in the value dictionary' % self.hash_key)
 
             if self.range_key == Doc.key:
                 # PK is (hash_key, Key)
                 # Key name needs to be hash_key.rest_of_key
-                if type(value) != dict or not key.name.startswith(str(hash_val)):
+                if not key.name.startswith(str(hash_val)):
                     raise Exception('Underlying DynamoDB table requires key name to be %s.[...], was %s while %s == %s' % (self.hash_key, key.name, self.hash_key, str(hash_val)))
             else:
                 # PK is (hash_key, range_key) != (hash_key, Key)
                 # Key name needs to be hash_key.range_key
-                if type(value) != dict or key.name != str(hash_val) + self.KEY_SEPARATOR + str(value.get(self.range_key, '')):
-                    raise Exception('Underlying DynamoDB table requires key name to be %s.%s was %s' % (self.hash_key, self.range_key, key.name))
+                if key.name != str(hash_val) + self.KEY_SEPARATOR + str(range_val):
+                    raise Exception('Underlying DynamoDB table requires key name to be %s.%s (%s.%s) was %s' % (self.hash_key, self.range_key, str(hash_val), str(range_val), key.name))
         elif self.hash_key != Doc.key:
             # PK is (hash_key) != (Key)
             # Key name then has to be hash_key
             if type(value) != dict or key.name != str(value.get(self.hash_key, '')):
                 raise Exception('Underlying DynamoDB table requires key name to be %s, was %s' % (self.hash_key, key.name))
+
+    def primary_key_from_value(self, value):
+        if self.range_key:
+            hash_val = value.get(self.hash_key, None)
+            range_val = value.get(self.range_key, None)
+            return {self.hash_key: hash_val, self.range_key: range_val}
+        else:
+            return {self.hash_key: value.get(self.hash_key, None)}
 
     def primary_key_from_key(self, key):
         '''Returns the Dynamo primary key for the datastore key,
@@ -326,9 +348,12 @@ class DynamoTable(Table):
             hash_key = str(key)
 
         # Cast to correct types
-        primary_key = {self.hash_key: self.datatypes[self.hash_key](hash_key)}
-        if self.range_key:
-            primary_key[self.range_key] = self.datatypes[self.range_key](range_key)
+        try:
+            primary_key = {self.hash_key: self.datatypes[self.hash_key](hash_key)}
+            if self.range_key:
+                primary_key[self.range_key] = self.datatypes[self.range_key](range_key)
+        except InvalidOperation:
+            raise Exception('Invalid key format for datastore: %s' % key)
 
         return primary_key
 

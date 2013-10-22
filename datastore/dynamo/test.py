@@ -79,7 +79,7 @@ class TestDynamoDatastore(TestDatastore):
     del self.conn
 
   def test_dynamo(self):
-    self.ds = DynamoDatastore(self.conn)
+    self.ds = DynamoDatastore(self.conn)      
     self.subtest_simple([self.ds], numelems=20)
 
   def test_dict_query(self):
@@ -91,7 +91,6 @@ class TestDynamoDatastore(TestDatastore):
     self.ds.put(key, test_dict)
 
     res = self.ds.get(key)
-    print res
     assert res == test_dict
     assert res['c'] is True
     assert res['d'] is False
@@ -100,7 +99,6 @@ class TestDynamoDatastore(TestDatastore):
     first = next(res, None)
     assert first is not None
     assert first == test_dict
-
 
   def test_rangekey_table(self):
     self.ds = DynamoDatastore(self.conn)
@@ -111,6 +109,8 @@ class TestDynamoDatastore(TestDatastore):
 
     res = self.ds.get(key)
     assert res == test_dict
+
+    
 
   def test_indexed_table(self):
     # Assume that a table with indexes exists before we begin. 
@@ -142,7 +142,6 @@ class TestDynamoDatastore(TestDatastore):
       'age': 40,
       'score': 500
     }
-    
     self.ds.put(johnny_key, johnny)
     self.ds.put(tom_key, tom)
     self.ds.put(barbara_key, barbara)
