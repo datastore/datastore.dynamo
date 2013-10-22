@@ -334,18 +334,27 @@ class DynamoTable(Table):
 
 
 class DynamoCursor(datastore.Cursor):
+    def __init__(self, query, iterable):
+        super(DynamoCursor, self).__init__(query, iterable)
+        self._orig_iterable = self._iterable
+        self._iterable = self.unwrap_gen(self._iterable)
+
+    def unwrap_gen(self, iterable):
+        for item in iterable:
+            yield DynamoDatastore._unwrap(item._data)
+
     @property
     def last_key(self):
-        return self._iterable._last_key_seen
+        return self._orig_iterable._last_key_seen
 
-    def __iter__(self):
-        return super(DynamoCursor, self).__iter__()
-
+    '''
+    
     def next(self):
         next = super(DynamoCursor, self).next()
         if next is not StopIteration:
             next = DynamoDatastore._unwrap(next._data)
         return next
+    '''
 
 class DynamoQuery(object):
     '''Translates queries from datastore queries to dynamodb queries.'''
@@ -361,11 +370,51 @@ class DynamoQuery(object):
             return table.primary_key_from_key(key)
 
     @classmethod
-    def translate(self, table, query):
+    def index_for_query(cls, table, query):
+        filter_fields = [f.field for f in query.filters]
+        for (field, idx) in table.indices.iteritems():
+            if field in filter_fields:
+                return idx
+        return None
+
+    @classmethod
+    def can_use_query(cls, table, query):
+        for f in query.filters:
+            if f.field == table.hash_key and f.op == '=':
+                return True
+        return False
+
+    @classmethod
+    def translate(cls, table, query):
         '''Translate given datastore `query` to a mongodb query on `table`.'''
 
+        # If we're looking at a specific hash key, we can query instead of scan
+        if cls.can_use_query(table, query):
+            kwargs = cls.query_arguments(table, query, full_scan=False)
+            idx = cls.index_for_query(table, query)
+            if idx:
+                kwargs['index'] = idx
+
+            datastore_cursor = table.query(**kwargs)
+        else:
+            kwargs = cls.query_arguments(table, query, full_scan=True)
+            datastore_cursor = table.scan(**kwargs)
+        
+        # create datastore Cursor with query and iterable of results
+        cursor = DynamoCursor(query, datastore_cursor)
+        cursor.apply_filter()
+        cursor.apply_order()
+        return cursor
+
+    @classmethod
+    def query_arguments(cls, table, query, full_scan=True):
         # must call find
-        kwargs = self.filters(query.filters)
+        if full_scan:
+            applicable_filters = query.filters
+        else:
+            applicable_filters = [f for f in query.filters if f.field in [table.hash_key, table.range_key]]
+
+        kwargs = cls.filters(applicable_filters)
 
         if query.limit:
             kwargs['limit'] = query.limit
@@ -374,23 +423,9 @@ class DynamoQuery(object):
         if query.offset:
             raise Exception('DynamoDatastore does not support query offset counts. Use offset_key instead.')
         if query.offset_key:
-            kwargs['exclusive_start_key'] = self.offset_key(table, query.offset_key)
+            kwargs['exclusive_start_key'] = cls.offset_key(table, query.offset_key)
 
-        # If we're looking at a specific hash key, we can query instead of scan
-        if table.hash_key + '__eq' in kwargs.keys():
-            filter_fields = [f.field for f in query.filters]
-            for (field, idx) in table.indices.iteritems():
-                if field in filter_fields:
-                    kwargs['index'] = idx
-                    break
-
-            cursor = table.query(**kwargs)
-        else:
-            cursor = table.scan(**kwargs)
-        
-        # create datastore Cursor with query and iterable of results
-        datastore_cursor = DynamoCursor(query, cursor)
-        return datastore_cursor
+        return kwargs
 
     @classmethod
     def filter(cls, filter):

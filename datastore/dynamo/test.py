@@ -166,6 +166,10 @@ class TestDynamoDatastore(TestDatastore):
       # Filter on hash and range key
       res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('name','=','Johnny')))
       assert res == [johnny]
+
+      # Filter on a hash key and an arbitrary other non-indexed key
+      res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('age','>',25)))
+      assert res == [tom]
       
       # Filter on hash and secondary index key
       res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('score','>',500)))
