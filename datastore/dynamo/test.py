@@ -86,11 +86,12 @@ class TestDynamoDatastore(TestDatastore):
     self.ds = DynamoDatastore(self.conn)
     pkey = '/' + self.SIMPLE_TABLE
     key = Key(pkey + '/abc')
-    test_dict = {'key': str(key), 'a': 3, 'b': {'1':2,'2':3}, 'c': True, 'd': False, 'e': '1.0'}
+    test_dict = {'key': str(key), 'a': 3, 'b': {'1':2,'2':3}, 'c': True, 'd': False, 'e': '1.0', 'f': None}
     
     self.ds.put(key, test_dict)
 
     res = self.ds.get(key)
+    print res
     assert res == test_dict
     assert res['c'] is True
     assert res['d'] is False

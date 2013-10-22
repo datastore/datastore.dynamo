@@ -87,7 +87,7 @@ class DynamoDatastore(datastore.Datastore):
         elif type(value) in [int, long, float]:
             return value
         else:
-            return '__obj__=' + json.dumps(value, default=json_util.default)
+            return '__json__=' + json.dumps(value, default=json_util.default)
 
     @staticmethod
     def _wrap(table, key, value):
@@ -110,8 +110,8 @@ class DynamoDatastore(datastore.Datastore):
     @staticmethod
     def _unwrap_value(value):
         if isinstance(value, basestring):
-            if value[0:8] == '__obj__=':
-                return json.loads(value[8:], object_hook=json_util.object_hook)
+            if value[0:9] == '__json__=':
+                return json.loads(value[9:], object_hook=json_util.object_hook)
             else:
                 return value
         elif isinstance(value, Decimal):
