@@ -299,7 +299,7 @@ class DynamoTable(Table):
             hash_val = value.get(self.hash_key, None)
             range_val = value.get(self.range_key, '')
 
-            if not hash_val:
+            if hash_val is None:
                 raise Exception('Underlying DynamoDB table requires the hash key "%s" to be present in the value dictionary' % self.hash_key)
 
             if self.range_key == Doc.key:
