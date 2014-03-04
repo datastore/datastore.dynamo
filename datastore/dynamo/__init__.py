@@ -14,6 +14,7 @@ from boto.dynamodb2.items import Item
 from boto.dynamodb2.table import Table
 from boto.dynamodb2.fields import HashKey, RangeKey
 from boto.dynamodb2.types import NUMBER, STRING
+from boto.dynamodb2.exceptions import ItemNotFound
 from boto.exception import JSONResponseError
 
 from copy import deepcopy
@@ -196,7 +197,12 @@ class DynamoDatastore(datastore.Datastore):
     def get(self, key):
         '''Return the object named by key.'''
         table = self._table(key)
-        item = table.get_item(**table.primary_key_from_key(key))
+        
+        try:
+            item = table.get_item(**table.primary_key_from_key(key))
+        except ItemNotFound:
+            return None
+
         return self._unwrap(item._data) if item and item._data != {} else None
 
     def put(self, key, value):
@@ -214,7 +220,10 @@ class DynamoDatastore(datastore.Datastore):
 
     def contains(self, key):
         '''Returns whether the object is in this datastore.'''
-        return self.get(key) is not None
+        try:
+            return self.get(key) is not None
+        except ItemNotFound:
+            return False
 
     def query(self, query):
         '''Returns a sequence of objects matching criteria expressed in `query`'''
@@ -370,6 +379,7 @@ class DynamoCursor(datastore.Cursor):
 
     @property
     def last_key(self):
+        #return self._orig_iterable.last_evaluated_key
         return self._orig_iterable._last_key_seen
 
     '''
@@ -383,7 +393,7 @@ class DynamoCursor(datastore.Cursor):
 
 class DynamoQuery(object):
     '''Translates queries from datastore queries to dynamodb queries.'''
-    operators = { '>':'gt', '>=':'ge', '=':'eq', '!=':'ne', '<=':'le', '<':'lt' }
+    operators = { '>':'gt', '>=':'gte', '=':'eq', '!=':'ne', '<=':'lte', '<':'lt' }
 
     @classmethod
     def offset_key(self, table, key):
@@ -399,8 +409,8 @@ class DynamoQuery(object):
         filter_fields = [f.field for f in query.filters]
         for (field, idx) in table.indices.iteritems():
             if field in filter_fields:
-                return idx
-        return None
+                return (idx, field)
+        return None, None
 
     @classmethod
     def can_use_query(cls, table, query):
@@ -415,14 +425,14 @@ class DynamoQuery(object):
 
         # If we're looking at a specific hash key, we can query instead of scan
         if cls.can_use_query(table, query):
-            kwargs = cls.query_arguments(table, query, full_scan=False)
-            idx = cls.index_for_query(table, query)
+            (idx, idx_field) = cls.index_for_query(table, query)
+            kwargs = cls.query_arguments(table, query, use_range=True, index_field=idx_field)
             if idx:
                 kwargs['index'] = idx
 
             datastore_cursor = table.query(**kwargs)
         else:
-            kwargs = cls.query_arguments(table, query, full_scan=True)
+            kwargs = cls.query_arguments(table, query, use_range=False)
             datastore_cursor = table.scan(**kwargs)
         
         # create datastore Cursor with query and iterable of results
@@ -432,14 +442,23 @@ class DynamoQuery(object):
         return cursor
 
     @classmethod
-    def query_arguments(cls, table, query, full_scan=True):
-        # must call find
-        if full_scan:
-            applicable_filters = query.filters
-        else:
-            applicable_filters = [f for f in query.filters if f.field in [table.hash_key, table.range_key]]
+    def query_arguments(cls, table, query, use_range=False, index_field=None):
+        filter_dict = {f.field: f for f in query.filters}
+            
+        if use_range:
+            # query using range key or secondary index
+            #index_field = index_field or table.range_key
+            if not table.hash_key in filter_dict:
+                raise ValueError('Trying to build range query while hash key \'%s\' not supplied in filters' % table.hash_key)
+            if index_field and not index_field in filter_dict:
+                raise ValueError('Trying to build range query while range/index key \'%s\' not supplied in filters' % index_field)
 
-        kwargs = cls.filters(applicable_filters)
+            query_filters = [f for (field,f) in filter_dict.items() if field in [table.hash_key, index_field or table.range_key]]
+            kwargs = cls.conditions(query_filters)
+        else:
+            # must call scan
+            applicable_filters = query.filters
+            kwargs = cls.conditions(applicable_filters)        
 
         if query.limit:
             kwargs['limit'] = query.limit
@@ -453,11 +472,12 @@ class DynamoQuery(object):
         return kwargs
 
     @classmethod
-    def filter(cls, filter):
-        '''Transform given `filter` into a dynamodb filter tuple.'''
-        return '%s__%s' % (filter.field, cls.operators[filter.op]), DynamoDatastore._wrap_value(filter.value)
+    def condition(cls, filter):
+        '''Transform given `filter` into a dynamodb condition tuple.'''
+        wrapped_val = DynamoDatastore._wrap_value(filter.value)
+        return ('%s__%s' % (filter.field, cls.operators[filter.op]), wrapped_val)
 
     @classmethod
-    def filters(cls, filters):
-        '''Transform given `filters` into a dynamodb filter dictionary.'''
-        return dict([cls.filter(f) for f in filters])
+    def conditions(cls, filters):
+        '''Transform given `filters` into a dynamodb condition dictionary.'''
+        return dict([cls.condition(f) for f in filters])

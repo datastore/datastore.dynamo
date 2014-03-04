@@ -77,7 +77,7 @@ class TestDynamoDatastore(TestDatastore):
     #boto.dynamodb2.table.Table(self.INDEXED_TABLE, connection=self.conn).delete()
     #boto.dynamodb2.table.Table(self.RANGEKEY_TABLE, connection=self.conn).delete()
     del self.conn
-
+  
   def test_dynamo(self):
     self.ds = DynamoDatastore(self.conn)      
     self.subtest_simple([self.ds], numelems=20)
@@ -99,7 +99,7 @@ class TestDynamoDatastore(TestDatastore):
     first = next(res, None)
     assert first is not None
     assert first == test_dict
-
+  
   def test_rangekey_table(self):
     self.ds = DynamoDatastore(self.conn)
     pkey = '/' + self.RANGEKEY_TABLE
@@ -160,26 +160,46 @@ class TestDynamoDatastore(TestDatastore):
       assert self.ds.get(barbara_key) == barbara
 
       # Filter on hash key exclusively
-      res = list(self.ds.query(Query(pkey).filter('department', '=', 1)))
+      q = Query(pkey).filter('department', '=', 1)
+      res = list(self.ds.query(q))
       assert res == [tom, johnny] or res == [johnny, tom]
       
       # Filter on hash and range key
-      res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('name','=','Johnny')))
+      q = Query(pkey).filter('department', '=', 1).filter('name','=','Johnny')
+      res = list(self.ds.query(q))
       assert res == [johnny]
 
+      # Filter on hash and range key with comparison
+      q = Query(pkey).filter('department', '=', 1).filter('name','>','Jason')
+      res = list(self.ds.query(q))
+      assert res == [johnny, tom] or res == [tom, johnny]
+
       # Filter on a hash key and an arbitrary other non-indexed key
-      res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('age','>',25)))
+      q = Query(pkey).filter('department', '=', 1).filter('age','>',25)
+      res = list(self.ds.query(q))
+      assert res == [tom]
+
+      # Filter on a hash key, secondary index, and non-indexed
+      q = Query(pkey).filter('department', '=', 1).filter('score','>=',25).filter('age','>=',25)
+      table = self.ds._table(q.key.child('_'))
+      idx, idx_field = DynamoQuery.index_for_query(table, q)
+      assert (idx, idx_field) == ('ScoreIndex','score')
+      args = DynamoQuery.query_arguments(table, q, use_range=True, index_field=idx_field)
+      assert args == {'score__gte': 25, 'department__eq': 1} # age is not indexed, not in query filters
+      res = list(self.ds.query(q))
       assert res == [tom]
       
       # Filter on hash and secondary index key
-      res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('score','>',500)))
+      q = Query(pkey).filter('department', '=', 1).filter('score','>',500)
+      res = list(self.ds.query(q))
       assert res == [tom, johnny] or res == [johnny, tom]
 
       # Update a secondary index key
       tom['score'] = 400
       self.ds.put(tom_key, tom)
 
-      res = list(self.ds.query(Query(pkey).filter('department', '=', 1).filter('score','>',500)))
+      q = Query(pkey).filter('department', '=', 1).filter('score','>',500)
+      res = list(self.ds.query(q))
       assert res == [johnny] or res == [johnny]
       
       assert not mock_method.called
