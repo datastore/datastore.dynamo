@@ -25,6 +25,7 @@ import json
 from datastore.core import Key, Namespace
 from bson import json_util
 from decimal import *
+from itertools import chain, groupby
 
 class Doc(object):
     '''Document key constants for datastore documents.'''
@@ -230,6 +231,32 @@ class DynamoDatastore(datastore.Datastore):
         table = self._table(query.key.child('_'))
         return DynamoQuery.translate(table, query)
 
+class DynamoTableIndex(object):
+    name = None
+    hash_key = None
+    range_key = None
+    index_type = None
+    
+    def __init__(self, name, hash_key, range_key, index_type):
+        self.name = name
+        self.hash_key = hash_key
+        self.range_key = range_key
+        self.index_type = index_type
+
+    def __repr__(self):
+        return 'DynamoTableIndex(%s, %s, %s, %s)'% (self.name, self.hash_key, self.range_key, self.index_type)
+
+    @classmethod
+    def from_description(cls, description, index_type=None):
+        def key_by_type_from_schema(schema, type):
+            return next((s['AttributeName'] for s in schema if s['KeyType'] == type), None)
+
+        name = description.get('IndexName', None)
+        hash_key = key_by_type_from_schema(description['KeySchema'], 'HASH')
+        range_key = key_by_type_from_schema(description['KeySchema'], 'RANGE')
+        return DynamoTableIndex(name, hash_key, range_key, index_type)
+
+
 class DynamoTable(Table):
     KEY_SEPARATOR = '.'
 
@@ -255,43 +282,50 @@ class DynamoTable(Table):
                 dtype_map = {'N': Decimal, 'S': str}
                 if dtype in dtype_map:
                     return dtype_map[dtype]
-                else:raise Exception('Unsupported datatype %s for attribute %s in underlying DynamoDB table %s' % (dtype, attr['AttributeName'], self._name))
+                else:
+                    raise Exception('Unsupported datatype %s for attribute %s in underlying DynamoDB table %s' % (dtype, attr['AttributeName'], self._name))
             def data_type_by_attribute(definitions):
                 return dict( (attr['AttributeName'], data_type_for_attribute(attr)) for attr in definitions)
 
+            self._main_index = DynamoTableIndex.from_description(status['Table'])
+
+            sec_idx_desc = list(chain(*[status['Table'].get(name, []) for name in ['LocalSecondaryIndexes', 'GlobalSecondaryIndexes']]))
+            sec_indices = [DynamoTableIndex.from_description(desc) for desc in sec_idx_desc]
+            
+            hash_for_idx = lambda idx: idx.hash_key
+            all_indices = sorted([self._main_index] + sec_indices, key=hash_for_idx)
+            self._indices = {k: list(g) for (k,g) in groupby(all_indices, hash_for_idx)}
+        
             self._datatypes = data_type_by_attribute(status['Table']['AttributeDefinitions'])
-            self._hash_key = key_by_type_from_schema(status['Table']['KeySchema'], 'HASH')
-            self._range_key = key_by_type_from_schema(status['Table']['KeySchema'], 'RANGE')
-            self._indices = dict(extract_index(idx) for idx in status['Table'].get('LocalSecondaryIndexes', []))
             self._ready = True
 
     @property
     def name(self):
-        return self._name if hasattr(self, '_name') else None
+        return getattr(self, '_name', None)
 
     @property
     def ready(self):
-        return hasattr(self, '_ready') and self._ready
+        return getattr(self, '_ready', False)
 
     @property
     def datatypes(self):
-        return self._datatypes if hasattr(self, '_datatypes') else None
-
-    @property
-    def indices(self):
-        return self._indices if hasattr(self, '_indices') else []
+        return getattr(self, '_datatypes', None)
 
     @property
     def hash_key(self):
-        return self._hash_key if hasattr(self, '_hash_key') else None
+        return self._main_index.hash_key if self._main_index else None
 
     @property
     def range_key(self):
-        return self._range_key if hasattr(self, '_range_key') else None
+        return self._main_index.range_key if self._main_index else None
+        #return getattr(self, '_range_key', None)
 
     @property
     def keys(self):
         return [k for k in [self.hash_key, self.range_key] if k is not None]
+
+    def indices_for_hash_key(self, hash_key):
+        return self._indices.get(hash_key, [])
 
     def validate_key_for_value(self, key, value):
         '''Verifies that the key is in valid format for the specified table.
@@ -407,34 +441,26 @@ class DynamoQuery(object):
     @classmethod
     def index_for_query(cls, table, query):
         filter_fields = [f.field for f in query.filters]
-        for (field, idx) in table.indices.iteritems():
-            if field in filter_fields:
-                return (idx, field)
-        return None, None
+        indices_by_hash = map(table.indices_for_hash_key, filter_fields)
+        hash_matches = list(chain(*indices_by_hash))
+        range_matches = (idx for idx in hash_matches if idx.range_key in filter_fields)
 
-    @classmethod
-    def can_use_query(cls, table, query):
-        for f in query.filters:
-            if f.field == table.hash_key and f.op == '=':
-                return True
-        return False
+        return next(range_matches, None) or (hash_matches or [None])[0]
 
     @classmethod
     def translate(cls, table, query):
         '''Translate given datastore `query` to a mongodb query on `table`.'''
 
         # If we're looking at a specific hash key, we can query instead of scan
-        if cls.can_use_query(table, query):
-            (idx, idx_field) = cls.index_for_query(table, query)
-            kwargs = cls.query_arguments(table, query, use_range=True, index_field=idx_field)
-            if idx:
-                kwargs['index'] = idx
-
+        idx = cls.index_for_query(table, query)
+        kwargs = cls.query_arguments(table, query, index=idx)
+        if idx:
+            if idx.name:
+                kwargs['index'] = idx.name
             datastore_cursor = table.query(**kwargs)
         else:
-            kwargs = cls.query_arguments(table, query, use_range=False)
             datastore_cursor = table.scan(**kwargs)
-        
+    
         # create datastore Cursor with query and iterable of results
         cursor = DynamoCursor(query, datastore_cursor)
         cursor.apply_filter()
@@ -442,18 +468,14 @@ class DynamoQuery(object):
         return cursor
 
     @classmethod
-    def query_arguments(cls, table, query, use_range=False, index_field=None):
+    def query_arguments(cls, table, query, index=None):
         filter_dict = {f.field: f for f in query.filters}
-            
-        if use_range:
-            # query using range key or secondary index
-            #index_field = index_field or table.range_key
-            if not table.hash_key in filter_dict:
-                raise ValueError('Trying to build range query while hash key \'%s\' not supplied in filters' % table.hash_key)
-            if index_field and not index_field in filter_dict:
-                raise ValueError('Trying to build range query while range/index key \'%s\' not supplied in filters' % index_field)
 
-            query_filters = [f for (field,f) in filter_dict.items() if field in [table.hash_key, index_field or table.range_key]]
+        if index:
+            if not index.hash_key in filter_dict:
+                raise ValueError('Trying to build query while hash key \'%s\' not supplied in filters' % index.hash_key)
+            
+            query_filters = [f for (field,f) in filter_dict.items() if field in [index.hash_key, index.range_key]]
             kwargs = cls.conditions(query_filters)
         else:
             # must call scan

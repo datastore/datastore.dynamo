@@ -11,7 +11,7 @@ from datastore.core.query import Query
 from datastore.core.key import Key
 
 from boto.dynamodb2.table import Table
-from boto.dynamodb2.fields import HashKey, RangeKey, KeysOnlyIndex, AllIndex
+from boto.dynamodb2.fields import HashKey, RangeKey, KeysOnlyIndex, AllIndex, GlobalAllIndex
 from boto.dynamodb2.types import NUMBER, STRING
 from math import floor
 
@@ -59,6 +59,11 @@ class TestDynamoDatastore(TestDatastore):
         AllIndex('ScoreIndex', parts=[
           HashKey('department'),
           RangeKey('score', data_type=NUMBER)
+        ])
+      ], global_indexes=[
+        GlobalAllIndex('GroupIndex', parts=[
+          HashKey('group'),
+          RangeKey('age', data_type=NUMBER)
         ])
       ], connection=self.conn)
 
@@ -123,6 +128,7 @@ class TestDynamoDatastore(TestDatastore):
       'key': str(johnny_key),
       'department': 1,
       'name': 'Johnny',
+      'group': 'managers',
       'age': 20,
       'score': 1500
     }
@@ -131,6 +137,7 @@ class TestDynamoDatastore(TestDatastore):
       'key': str(tom_key),
       'department': 1,
       'name': 'Tom',
+      'group': 'employees',
       'age': 30,
       'score': 1000
     }
@@ -139,6 +146,7 @@ class TestDynamoDatastore(TestDatastore):
       'key': str(barbara_key),
       'department': 2,
       'name': 'Barbara',
+      'group': 'managers',
       'age': 40,
       'score': 500
     }
@@ -147,7 +155,8 @@ class TestDynamoDatastore(TestDatastore):
     self.ds.put(barbara_key, barbara)
 
     query = Query(pkey).filter('age','>',20)
-    # since the query does not contain the hash key (department), we'll do a scan instead of a query
+    # since the query does not contain any of the hash keys (department, username), 
+    # we'll have to do a scan instead of a query
     with mock.patch.object(Table, 'query', return_value=None) as mock_method:
       res = list(self.ds.query(query))
       assert not mock_method.called
@@ -161,6 +170,11 @@ class TestDynamoDatastore(TestDatastore):
 
       # Filter on hash key exclusively
       q = Query(pkey).filter('department', '=', 1)
+      table = self.ds._table(q.key.child('_'))
+      idx = DynamoQuery.index_for_query(table, q)
+      assert idx.name is None, idx.name 
+      assert idx.hash_key == 'department', idx.hash_key
+      assert idx.range_key == 'name', idx.range_key
       res = list(self.ds.query(q))
       assert res == [tom, johnny] or res == [johnny, tom]
       
@@ -181,10 +195,11 @@ class TestDynamoDatastore(TestDatastore):
 
       # Filter on a hash key, secondary index, and non-indexed
       q = Query(pkey).filter('department', '=', 1).filter('score','>=',25).filter('age','>=',25)
-      table = self.ds._table(q.key.child('_'))
-      idx, idx_field = DynamoQuery.index_for_query(table, q)
-      assert (idx, idx_field) == ('ScoreIndex','score')
-      args = DynamoQuery.query_arguments(table, q, use_range=True, index_field=idx_field)
+      idx = DynamoQuery.index_for_query(table, q)
+      assert idx.name == 'ScoreIndex', idx.name 
+      assert idx.hash_key == 'department', idx.hash_key
+      assert idx.range_key == 'score', idx.range_key
+      args = DynamoQuery.query_arguments(table, q, index=idx)
       assert args == {'score__gte': 25, 'department__eq': 1} # age is not indexed, not in query filters
       res = list(self.ds.query(q))
       assert res == [tom]
@@ -194,14 +209,48 @@ class TestDynamoDatastore(TestDatastore):
       res = list(self.ds.query(q))
       assert res == [tom, johnny] or res == [johnny, tom]
 
-      # Update a secondary index key
+      # Filter on global hash key exclusively
+      q = Query(pkey).filter('group', '=', 'managers')
+      idx = DynamoQuery.index_for_query(table, q)
+      assert idx.name == 'GroupIndex', idx.name 
+      assert idx.hash_key == 'group', idx.hash_key
+      assert idx.range_key == 'age', idx.range_key
+      res = list(self.ds.query(q))
+      assert res == [johnny, barbara] or res == [barbara, johnny], res
+      
+      # Filter on global hash and range key
+      q = Query(pkey).filter('group', '=', 'managers').filter('age','=',40)
+      res = list(self.ds.query(q))
+      assert res == [barbara]
+
+      # Filter on global hash and range key with comparison
+      q = Query(pkey).filter('group', '=', 'managers').filter('age','<',30)
+      res = list(self.ds.query(q))
+      assert res == [johnny]
+
+      # Filter on global hash key and an arbitrary other non-indexed key
+      q = Query(pkey).filter('group', '=', 'managers').filter('score','>',500)
+      res = list(self.ds.query(q))
+      assert res == [johnny]
+
+      # Update a secondary index range key
       tom['score'] = 400
       self.ds.put(tom_key, tom)
 
+      # Query using secondary index again, verify updated values
       q = Query(pkey).filter('department', '=', 1).filter('score','>',500)
       res = list(self.ds.query(q))
       assert res == [johnny] or res == [johnny]
+
+      # Update a global index rang key
+      johnny['age'] = 35
+      self.ds.put(johnny_key, johnny)
       
+      # Query using global index again, verify updated values
+      q = Query(pkey).filter('group', '=', 'managers').filter('age','>',30)
+      res = list(self.ds.query(q))
+      assert res == [johnny, barbara] or res == [barbara, johnny]
+
       assert not mock_method.called
 
 
