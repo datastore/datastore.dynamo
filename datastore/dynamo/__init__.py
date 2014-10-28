@@ -337,29 +337,32 @@ class DynamoTable(Table):
 
         if self.range_key:
             if type(value) != dict:
-                raise Exception('Underlying DynamoDB table requires values to be a dictionary')
+                raise ValueError('Underlying DynamoDB table requires values to be a dictionary')
 
             hash_val = value.get(self.hash_key, None)
             range_val = value.get(self.range_key, '')
 
             if hash_val is None:
-                raise Exception('Underlying DynamoDB table requires the hash key "%s" to be present in the value dictionary' % self.hash_key)
+                raise ValueError('Underlying DynamoDB table requires the hash key "%s" to be present in the value dictionary' % self.hash_key)
+
+            if self.KEY_SEPARATOR in str(hash_val):
+                raise ValueError('Hash key "%s" should not contain key seperator: "%s"' % (self.hash_key, self.KEY_SEPARATOR))
 
             if self.range_key == Doc.key:
                 # PK is (hash_key, Key)
                 # Key name needs to be hash_key.rest_of_key
                 if not key.name.startswith(str(hash_val)):
-                    raise Exception('Underlying DynamoDB table requires key name to be %s.[...], was %s while %s == %s' % (self.hash_key, key.name, self.hash_key, str(hash_val)))
+                    raise ValueError('Underlying DynamoDB table requires key name to be %s.[...], was %s while %s == %s' % (self.hash_key, key.name, self.hash_key, str(hash_val)))
             else:
                 # PK is (hash_key, range_key) != (hash_key, Key)
                 # Key name needs to be hash_key.range_key
                 if key.name != str(hash_val) + self.KEY_SEPARATOR + str(range_val):
-                    raise Exception('Underlying DynamoDB table requires key name to be %s.%s (%s.%s) was %s' % (self.hash_key, self.range_key, str(hash_val), str(range_val), key.name))
+                    raise ValueError('Underlying DynamoDB table requires key name to be %s.%s (%s.%s) was %s' % (self.hash_key, self.range_key, str(hash_val), str(range_val), key.name))
         elif self.hash_key != Doc.key:
             # PK is (hash_key) != (Key)
             # Key name then has to be hash_key
             if type(value) != dict or key.name != str(value.get(self.hash_key, '')):
-                raise Exception('Underlying DynamoDB table requires key name to be %s, was %s' % (self.hash_key, key.name))
+                raise ValueError('Underlying DynamoDB table requires key name to be %s, was %s' % (self.hash_key, key.name))
 
     def primary_key_from_value(self, value):
         if self.range_key:
